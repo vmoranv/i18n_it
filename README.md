@@ -37,8 +37,10 @@ python extract_i18n_todo.py --root <project_root>
 默认输出路径（自动推导）：
 
 ```text
-<project_root>/i18n.todo.scan.<project_root_name>.md
+<artifacts_dir>/<project_root_name>/i18n.todo.scan.<project_root_name>.md
 ```
+
+默认 `artifacts_dir` 为当前目录下的 `output/`，可用 `--artifacts-dir` 覆盖。
 
 可选：覆盖输出路径
 
@@ -58,6 +60,12 @@ python extract_i18n_todo.py --root <project_root> --extensions ".py,.ts,.tsx,.vu
 python extract_i18n_todo.py --root <project_root> --key-prefix hardcoded
 ```
 
+可选：统一产物目录（推荐）
+
+```bash
+python extract_i18n_todo.py --root <project_root> --artifacts-dir output
+```
+
 默认支持示例：`py/pyi`、`js/ts/jsx/tsx/mjs/cjs`、`vue/svelte/astro/mdx`、`java/kt/go/rs/php/cs/c/cpp/swift/dart`、`rb/sh`、`yaml/toml/ini/conf/properties`、`html/xml/svg`。
 
 ## 2) 翻译 TODO（OpenAI 兼容接口，如 Grok）
@@ -74,7 +82,7 @@ python translate_i18n_todo.py --project-root <project_root> --target-locale en-U
 默认输入路径（自动推导）：
 
 ```text
-<project_root>/i18n.todo.scan.<project_root_name>.md
+<artifacts_dir>/<project_root_name>/i18n.todo.scan.<project_root_name>.md
 ```
 
 默认输出路径（自动推导）：
@@ -83,19 +91,26 @@ python translate_i18n_todo.py --project-root <project_root> --target-locale en-U
 <todo_stem>.translated<todo_suffix>
 ```
 
+当不传 `--todo` 且使用默认路径时，翻译产物会落在同一 `output/<project_root_name>/` 目录。
+
 可选：手动指定输入输出
 
 ```bash
 python translate_i18n_todo.py --todo <todo_md> --output <translated_md> --env-file .env --target-locale en-US
 ```
 
-## 3) 主工作流：同步到 i18n locale JSON（手动映射，支持并发）
-
-先复制映射模板并按项目实际路径修改：
+可选：统一产物目录（推荐）
 
 ```bash
-Copy-Item sync_i18n_locale.mapping.example.json sync_i18n_locale.mapping.json
+python translate_i18n_todo.py --project-root <project_root> --artifacts-dir output --target-locale en-US
 ```
+
+## 3) 主工作流：同步到 i18n locale JSON（手动映射，支持并发）
+
+项目内可直接使用并维护以下映射文件（建议纳入 Git 跟踪）：
+
+- `sync_i18n_locale.astrbot.mapping.json`
+- `sync_i18n_locale.dashboard.mapping.json`
 
 执行同步（先 dry-run）：
 

@@ -234,9 +234,9 @@ def parse_location(location: str) -> tuple[Path, int] | None:
     return Path(path_part), line_no
 
 
-def default_todo_path(project_root: Path) -> Path:
+def default_todo_path(project_root: Path, artifacts_dir: Path) -> Path:
     root_name = project_root.name or "project"
-    return project_root / f"i18n.todo.scan.{root_name}.md"
+    return artifacts_dir / root_name / f"i18n.todo.scan.{root_name}.md"
 
 
 def default_output_path(todo_path: Path) -> Path:
@@ -655,7 +655,7 @@ def main() -> int:
         default=None,
         help=(
             "Input TODO markdown path. "
-            "Default: <project-root>/i18n.todo.scan.<project_root_name>.md"
+            "Default: <artifacts-dir>/<project_root_name>/i18n.todo.scan.<project_root_name>.md"
         ),
     )
     parser.add_argument(
@@ -672,6 +672,15 @@ def main() -> int:
         type=Path,
         default=Path("."),
         help="Project root used to resolve `path:line` entries.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("output"),
+        help=(
+            "Base directory for generated artifacts when --todo/--output are not set. "
+            "Default: ./output"
+        ),
     )
     parser.add_argument(
         "--key-prefix",
@@ -754,8 +763,13 @@ def main() -> int:
     api_key = args.api_key or os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY")
 
     project_root = args.project_root.resolve()
+    artifacts_dir = args.artifacts_dir.resolve()
     key_prefix = normalize_key_prefix(args.key_prefix)
-    todo_path = args.todo.resolve() if args.todo else default_todo_path(project_root)
+    todo_path = (
+        args.todo.resolve()
+        if args.todo
+        else default_todo_path(project_root, artifacts_dir)
+    )
     output_path = (
         args.output.resolve() if args.output else default_output_path(todo_path)
     )

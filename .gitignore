@@ -23,3 +23,7 @@ i18n.todo.verify*.md
 
 # Sync/apply reports
 sync.report*.json
+
+# Centralized artifacts directory
+output/**
+!output/.gitkeep

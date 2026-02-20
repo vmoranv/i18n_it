@@ -1,0 +1,9 @@
+{
+  "mappings": [
+    { "source": "builtin_stars/**", "file": "en-us/builtin_stars.ftl" },
+    { "source": "core/**", "file": "en-us/main.ftl" },
+    { "source": "cli/**", "file": "en-us/main.ftl" },
+    { "source": "dashboard/**", "file": "en-us/main.ftl" },
+    { "source": "**", "file": "en-us/main.ftl" }
+  ]
+}

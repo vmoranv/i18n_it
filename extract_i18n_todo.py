@@ -151,9 +151,9 @@ def collect_files(root: Path, extensions: set[str]) -> list[Path]:
     return files
 
 
-def default_output_path(root: Path) -> Path:
+def default_output_path(root: Path, artifacts_dir: Path) -> Path:
     root_name = root.name or "project"
-    return root / f"i18n.todo.scan.{root_name}.md"
+    return artifacts_dir / root_name / f"i18n.todo.scan.{root_name}.md"
 
 
 def collect_python_ignored_string_lines(source: str) -> set[int]:
@@ -535,7 +535,17 @@ def main() -> int:
         type=Path,
         default=None,
         help=(
-            "Output markdown file path. Default: <root>/i18n.todo.scan.<root_name>.md"
+            "Output markdown file path. "
+            "Default: <artifacts-dir>/<root_name>/i18n.todo.scan.<root_name>.md"
+        ),
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("output"),
+        help=(
+            "Base directory for generated artifacts when --output is not set. "
+            "Default: ./output"
         ),
     )
     parser.add_argument(
@@ -554,6 +564,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
+    artifacts_dir = args.artifacts_dir.resolve()
     key_prefix = normalize_key_prefix(args.key_prefix)
     extensions = parse_extensions(args.extensions)
     if not extensions:
@@ -562,7 +573,11 @@ def main() -> int:
     findings, errors = extract_findings(root, files)
     content = to_markdown(findings, root, key_prefix)
 
-    output_path = args.output.resolve() if args.output else default_output_path(root)
+    output_path = (
+        args.output.resolve()
+        if args.output
+        else default_output_path(root, artifacts_dir)
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8")
 

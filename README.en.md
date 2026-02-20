@@ -37,8 +37,10 @@ Each TODO item now includes a stable translation key, for example:
 Auto-derived default output path:
 
 ```text
-<project_root>/i18n.todo.scan.<project_root_name>.md
+<artifacts_dir>/<project_root_name>/i18n.todo.scan.<project_root_name>.md
 ```
+
+By default, `artifacts_dir` is `./output` (override with `--artifacts-dir`).
 
 Optional explicit output:
 
@@ -58,6 +60,12 @@ Optional custom key prefix:
 python extract_i18n_todo.py --root <project_root> --key-prefix hardcoded
 ```
 
+Optional centralized artifacts directory (recommended):
+
+```bash
+python extract_i18n_todo.py --root <project_root> --artifacts-dir output
+```
+
 Default extension coverage includes examples like `py/pyi`, `js/ts/jsx/tsx/mjs/cjs`, `vue/svelte/astro/mdx`, `java/kt/go/rs/php/cs/c/cpp/swift/dart`, `rb/sh`, `yaml/toml/ini/conf/properties`, `html/xml/svg`.
 
 ## 2) Translate TODO with OpenAI-compatible API (e.g., Grok)
@@ -73,7 +81,7 @@ Disable this via `--no-mark-checked`.
 Auto-derived default input path:
 
 ```text
-<project_root>/i18n.todo.scan.<project_root_name>.md
+<artifacts_dir>/<project_root_name>/i18n.todo.scan.<project_root_name>.md
 ```
 
 Auto-derived default output path:
@@ -82,19 +90,26 @@ Auto-derived default output path:
 <todo_stem>.translated<todo_suffix>
 ```
 
+When `--todo` is omitted and default paths are used, translated drafts are written to the same `output/<project_root_name>/` folder.
+
 Optional explicit input/output:
 
 ```bash
 python translate_i18n_todo.py --todo <todo_md> --output <translated_md> --env-file .env --target-locale en-US
 ```
 
-## 3) Main workflow: sync into i18n locale JSON (manual mapping, concurrent)
-
-Copy mapping template and edit it for your project:
+Optional centralized artifacts directory (recommended):
 
 ```bash
-Copy-Item sync_i18n_locale.mapping.example.json sync_i18n_locale.mapping.json
+python translate_i18n_todo.py --project-root <project_root> --artifacts-dir output --target-locale en-US
 ```
+
+## 3) Main workflow: sync into i18n locale JSON (manual mapping, concurrent)
+
+Use and maintain these mapping files in this repo (recommended to keep them tracked in Git):
+
+- `sync_i18n_locale.astrbot.mapping.json`
+- `sync_i18n_locale.dashboard.mapping.json`
 
 Run sync first in dry-run mode:
 

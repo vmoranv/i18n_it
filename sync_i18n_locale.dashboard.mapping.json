@@ -1,0 +1,9 @@
+{
+  "mappings": [
+    { "source": "index.html", "file": "core/common.json" },
+    { "source": "src/App.vue", "file": "messages/success.json" },
+    { "source": "src/components/chat/**", "file": "features/chat.json" },
+    { "source": "src/**", "file": "core/common.json" },
+    { "source": "**", "file": "core/common.json" }
+  ]
+}

@@ -808,6 +808,14 @@ def main() -> int:
         action="store_true",
         help="Skip draft entries without mapping instead of failing.",
     )
+    parser.add_argument(
+        "--require-existing-target-files",
+        action="store_true",
+        help=(
+            "Fail if any mapped locale target file does not already exist under --i18n-root. "
+            "Useful to prevent accidental writes to wrong locale paths."
+        ),
+    )
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -902,6 +910,29 @@ def main() -> int:
             "Unmapped draft entries found. Add mapping rules or use --allow-unmapped.\n"
             f"{preview}{more}"
         )
+
+    if args.require_existing_target_files:
+        missing_targets: list[str] = []
+        for rel_file in grouped_entries:
+            full = (i18n_root / rel_file).resolve()
+            if not full.is_relative_to(i18n_root):
+                raise ValueError(
+                    f"Target path escapes i18n root: {rel_file.as_posix()}"
+                )
+            if not full.exists():
+                missing_targets.append(rel_file.as_posix())
+        if missing_targets:
+            preview = "\n".join(f"- {p}" for p in sorted(missing_targets)[:50])
+            more = (
+                f"\n... and {len(missing_targets) - 50} more"
+                if len(missing_targets) > 50
+                else ""
+            )
+            raise FileNotFoundError(
+                "Mapped locale target files do not exist (use corrected mapping or remove "
+                "--require-existing-target-files):\n"
+                f"{preview}{more}"
+            )
 
     results: list[FileSyncResult] = []
     with concurrent.futures.ThreadPoolExecutor(
