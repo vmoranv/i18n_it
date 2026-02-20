@@ -117,7 +117,7 @@ Run sync first in dry-run mode:
 python sync_i18n_locale.py \
   --translated <translated_md> \
   --i18n-root <locale_root_dir> \
-  --mapping sync_i18n_locale.mapping.json \
+  --mapping <mapping_json> \
   --concurrency 8 \
   --dry-run
 ```
@@ -130,7 +130,7 @@ Optional report output:
 python sync_i18n_locale.py \
   --translated <translated_md> \
   --i18n-root <locale_root_dir> \
-  --mapping sync_i18n_locale.mapping.json \
+  --mapping <mapping_json> \
   --report-json sync.report.json
 ```
 

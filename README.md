@@ -118,7 +118,7 @@ python translate_i18n_todo.py --project-root <project_root> --artifacts-dir outp
 python sync_i18n_locale.py \
   --translated <translated_md> \
   --i18n-root <locale_root_dir> \
-  --mapping sync_i18n_locale.mapping.json \
+  --mapping <mapping_json> \
   --concurrency 8 \
   --dry-run
 ```
@@ -131,7 +131,7 @@ python sync_i18n_locale.py \
 python sync_i18n_locale.py \
   --translated <translated_md> \
   --i18n-root <locale_root_dir> \
-  --mapping sync_i18n_locale.mapping.json \
+  --mapping <mapping_json> \
   --report-json sync.report.json
 ```
 
