@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local agent/runtime folders
+.serena/
+
+# Temporary files
+.tmp*
+*.tmp
+
+# Generated i18n drafts
+i18n.todo.scan.*.md
+i18n.todo.translated*.md
+i18n.todo.rescan*.md
+i18n.todo.retry*.md
+i18n.todo.verify*.md
+
+# Sync/apply reports
+sync.report*.json
