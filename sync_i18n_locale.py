@@ -144,7 +144,9 @@ def normalize_key_cell(text: str) -> str | None:
     return key or None
 
 
-def parse_translated_markdown(path: Path, column: Literal["translated", "source"]) -> list[DraftItem]:
+def parse_translated_markdown(
+    path: Path, column: Literal["translated", "source"]
+) -> list[DraftItem]:
     items: list[DraftItem] = []
     current_path: Path | None = None
 
@@ -227,7 +229,11 @@ def extract_quoted_texts(text: str) -> list[str]:
 
 
 def extract_tag_texts(text: str) -> list[str]:
-    return [m.group("text").strip() for m in TAG_TEXT_RE.finditer(text) if m.group("text").strip()]
+    return [
+        m.group("text").strip()
+        for m in TAG_TEXT_RE.finditer(text)
+        if m.group("text").strip()
+    ]
 
 
 def try_extract_assignment_rhs(source_text: str, target_text: str) -> str | None:
@@ -252,7 +258,9 @@ def try_extract_assignment_rhs(source_text: str, target_text: str) -> str | None
     return None
 
 
-def take_by_han_positions(source_values: list[str], target_values: list[str]) -> str | None:
+def take_by_han_positions(
+    source_values: list[str], target_values: list[str]
+) -> str | None:
     han_positions = [idx for idx, text in enumerate(source_values) if has_han(text)]
     if not han_positions:
         return None
@@ -439,7 +447,11 @@ def parse_target_spec(raw: object) -> TargetSpec:
         if not isinstance(file_raw, str) or not file_raw.strip():
             raise ValueError("Mapping object must contain non-empty 'file'")
         prefix_raw = raw.get("prefix")
-        prefix = prefix_raw.strip() if isinstance(prefix_raw, str) and prefix_raw.strip() else None
+        prefix = (
+            prefix_raw.strip()
+            if isinstance(prefix_raw, str) and prefix_raw.strip()
+            else None
+        )
         return TargetSpec(file=Path(normalize_rel_path(file_raw)), prefix=prefix)
     raise ValueError("Mapping target must be string or object")
 
@@ -459,14 +471,18 @@ def load_mapping_rules(mapping_path: Path) -> list[MappingRule]:
             target = {"file": file_raw, "prefix": row.get("prefix")}
             spec = parse_target_spec(target)
             pattern = normalize_rel_path(source)
-            rules.append(MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern)))
+            rules.append(
+                MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern))
+            )
     elif isinstance(payload, dict):
         for source, target in payload.items():
             if not isinstance(source, str) or source.startswith("$"):
                 continue
             pattern = normalize_rel_path(source)
             spec = parse_target_spec(target)
-            rules.append(MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern)))
+            rules.append(
+                MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern))
+            )
     else:
         raise ValueError("Mapping JSON must be an object")
 
@@ -475,7 +491,9 @@ def load_mapping_rules(mapping_path: Path) -> list[MappingRule]:
     return rules
 
 
-def resolve_target_spec(source_rel_path: str, rules: list[MappingRule]) -> TargetSpec | None:
+def resolve_target_spec(
+    source_rel_path: str, rules: list[MappingRule]
+) -> TargetSpec | None:
     # Exact matches first
     for rule in rules:
         if not rule.is_glob and source_rel_path == rule.pattern:
@@ -853,7 +871,9 @@ def main() -> int:
         prefix = spec.prefix or auto_prefix_for_path(item.rel_path)
         file_key = spec.file.as_posix()
         used = used_keys_per_file.setdefault(file_key, {})
-        row_text = item.translated_text if args.column == "translated" else item.source_text
+        row_text = (
+            item.translated_text if args.column == "translated" else item.source_text
+        )
         value = extract_locale_value(
             source_text=item.source_text,
             target_text=row_text,
@@ -884,7 +904,9 @@ def main() -> int:
         )
 
     results: list[FileSyncResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=args.concurrency
+    ) as executor:
         futures = [
             executor.submit(
                 sync_one_locale_file,

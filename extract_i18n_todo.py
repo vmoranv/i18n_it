@@ -535,8 +535,7 @@ def main() -> int:
         type=Path,
         default=None,
         help=(
-            "Output markdown file path. "
-            "Default: <root>/i18n.todo.scan.<root_name>.md"
+            "Output markdown file path. Default: <root>/i18n.todo.scan.<root_name>.md"
         ),
     )
     parser.add_argument(

@@ -23,7 +23,9 @@ HAN_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 ATTR_RE = re.compile(
     r"(?P<name>[A-Za-z_][\w:-]*)=(?P<quote>['\"])(?P<value>[^'\"]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^'\"]*)(?P=quote)"
 )
-TAG_TEXT_RE = re.compile(r">(?P<text>[^<{]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^<{]*)<")
+TAG_TEXT_RE = re.compile(
+    r">(?P<text>[^<{]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^<{]*)<"
+)
 STRING_LITERAL_RE = re.compile(
     r"(?P<quote>['\"])(?P<text>[^'\"]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^'\"]*)(?P=quote)"
 )
@@ -143,7 +145,9 @@ def line_ending_of(text: str) -> str:
     return ""
 
 
-def build_template_line(old_noeol: str, key: str | None, template_func: str) -> str | None:
+def build_template_line(
+    old_noeol: str, key: str | None, template_func: str
+) -> str | None:
     if not key:
         return None
     if not HAN_RE.search(old_noeol):
@@ -152,23 +156,25 @@ def build_template_line(old_noeol: str, key: str | None, template_func: str) -> 
     attr_match = ATTR_RE.search(old_noeol)
     if attr_match:
         name = attr_match.group("name")
-        bound_name = name if (name.startswith(":") or name.startswith("v-bind:")) else f":{name}"
-        replacement = f'{bound_name}="{template_func}(\'{key}\')"'
-        return f"{old_noeol[:attr_match.start()]}{replacement}{old_noeol[attr_match.end():]}"
+        bound_name = (
+            name if (name.startswith(":") or name.startswith("v-bind:")) else f":{name}"
+        )
+        replacement = f"{bound_name}=\"{template_func}('{key}')\""
+        return f"{old_noeol[: attr_match.start()]}{replacement}{old_noeol[attr_match.end() :]}"
 
     tag_text_match = TAG_TEXT_RE.search(old_noeol)
     if tag_text_match:
         replacement = f">{{{{ {template_func}('{key}') }}}}<"
         return (
-            f"{old_noeol[:tag_text_match.start()]}"
+            f"{old_noeol[: tag_text_match.start()]}"
             f"{replacement}"
-            f"{old_noeol[tag_text_match.end():]}"
+            f"{old_noeol[tag_text_match.end() :]}"
         )
 
     str_match = STRING_LITERAL_RE.search(old_noeol)
     if str_match:
         replacement = f"{template_func}('{key}')"
-        return f"{old_noeol[:str_match.start()]}{replacement}{old_noeol[str_match.end():]}"
+        return f"{old_noeol[: str_match.start()]}{replacement}{old_noeol[str_match.end() :]}"
 
     return None
 
@@ -185,9 +191,13 @@ def apply_edits_to_file(
 ) -> ApplyResult:
     full_path = (project_root / file_path).resolve()
     if not full_path.is_file():
-        return ApplyResult(path=file_path, changed=0, skipped=len(file_edits), missing=True)
+        return ApplyResult(
+            path=file_path, changed=0, skipped=len(file_edits), missing=True
+        )
 
-    lines = full_path.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+    lines = full_path.read_text(encoding="utf-8", errors="ignore").splitlines(
+        keepends=True
+    )
     changed = 0
     skipped = 0
 
@@ -274,7 +284,9 @@ def main() -> int:
         grouped.setdefault(edit.path, []).append(edit)
 
     results: list[ApplyResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=args.concurrency
+    ) as executor:
         futures = [
             executor.submit(
                 apply_edits_to_file,

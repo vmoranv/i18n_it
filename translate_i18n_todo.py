@@ -435,9 +435,7 @@ def build_messages(
             '10) Output format: {"translations": [{"id": <int>, "translated": <string>, "key": <string>}, ...]}.\n'
         )
     else:
-        system_prompt += (
-            '7) Output format: {"translations": [{"id": <int>, "translated": <string>}, ...]}.\n'
-        )
+        system_prompt += '7) Output format: {"translations": [{"id": <int>, "translated": <string>}, ...]}.\n'
 
     user_payload = {
         "target_locale": target_locale,
@@ -744,19 +742,27 @@ def main() -> int:
     if env_file.is_file():
         print(f"Loaded {loaded_vars} env var(s) from {env_file}")
 
-    model = args.model or os.getenv("GROK_MODEL") or os.getenv("OPENAI_MODEL") or "grok-2-latest"
-    api_base = args.api_base or os.getenv("GROK_API_BASE") or os.getenv("OPENAI_BASE_URL")
+    model = (
+        args.model
+        or os.getenv("GROK_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "grok-2-latest"
+    )
+    api_base = (
+        args.api_base or os.getenv("GROK_API_BASE") or os.getenv("OPENAI_BASE_URL")
+    )
     api_key = args.api_key or os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY")
 
     project_root = args.project_root.resolve()
     key_prefix = normalize_key_prefix(args.key_prefix)
     todo_path = args.todo.resolve() if args.todo else default_todo_path(project_root)
-    output_path = args.output.resolve() if args.output else default_output_path(todo_path)
+    output_path = (
+        args.output.resolve() if args.output else default_output_path(todo_path)
+    )
 
     if not todo_path.is_file():
         raise FileNotFoundError(
-            f"TODO file not found: {todo_path}. "
-            "Use --todo to set a custom input file."
+            f"TODO file not found: {todo_path}. Use --todo to set a custom input file."
         )
 
     items = parse_todo_items(
@@ -855,7 +861,9 @@ def main() -> int:
 
                 if unresolved:
                     if len(unresolved) == len(batch):
-                        raise ValueError("Model returned no valid translations for this batch")
+                        raise ValueError(
+                            "Model returned no valid translations for this batch"
+                        )
                     if not args.continue_on_error:
                         raise ValueError(
                             f"Model returned incomplete translations: missing {len(unresolved)} of {len(batch)}"
@@ -875,9 +883,13 @@ def main() -> int:
                 for item in batch:
                     parsed = resolved_map.get(
                         item.id,
-                        ParsedTranslation(translated_text=item.source_text, key=item.key),
+                        ParsedTranslation(
+                            translated_text=item.source_text, key=item.key
+                        ),
                     )
-                    translated = keep_placeholder_safe(item.source_text, parsed.translated_text)
+                    translated = keep_placeholder_safe(
+                        item.source_text, parsed.translated_text
+                    )
                     new_key = item.key
                     if args.key_mode == "llm" and should_regenerate_key(item.key):
                         if parsed.key:
