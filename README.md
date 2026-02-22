@@ -22,7 +22,7 @@ GROK_MODEL=grok-4.1-fast
 
 `translate_i18n_todo.py` 会自动加载 `.env`，CLI 参数优先级更高。
 
-可选：你也可以维护 `translate_i18n_todo.locale_map.json`（已内置 `zh-CN` 示例），
+可选：你也可以维护 `locale_map.json`（已内置 `zh-CN` 示例），
 让 LLM 在接收 `--target-locale` 时拿到更清晰的人类可读语种提示。
 
 `locale_map` 支持两种常用写法：
@@ -103,7 +103,7 @@ python translate_i18n_todo.py --project-root <project_root> --target-locale zh-C
 如需指定自定义 locale map：
 
 ```bash
-python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN --locale-map translate_i18n_todo.locale_map.json
+python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN --locale-map locale_map.json
 ```
 
 多语种并行翻译（支持简写，如 `jp`）：
@@ -112,7 +112,7 @@ python translate_i18n_todo.py --project-root <project_root> --target-locale zh-C
 python translate_i18n_todo.py \
   --project-root <project_root> \
   --target-locales "en-US,jp,ko-KR" \
-  --locale-map translate_i18n_todo.locale_map.json \
+  --locale-map locale_map.json \
   --concurrency 8 \
   --locale-concurrency 2 \
   --continue-on-error

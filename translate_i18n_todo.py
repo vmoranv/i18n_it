@@ -47,6 +47,8 @@ ENV_ASSIGN_RE = re.compile(
 )
 LOCALE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 LOCALE_COLUMN_CHAR_RE = re.compile(r"[^a-z0-9_-]+")
+DEFAULT_LOCALE_MAP_PATH = Path("locale_map.json")
+LEGACY_LOCALE_MAP_PATH = Path("translate_i18n_todo.locale_map.json")
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,23 @@ def load_locale_map(path: Path | None) -> dict[str, LocaleMapEntry]:
         if locale_value or hint_value:
             out[key] = LocaleMapEntry(locale=locale_value, hint=hint_value)
     return out
+
+
+def resolve_locale_map_path(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    resolved = path.resolve()
+    if resolved.is_file():
+        return resolved
+    if path == DEFAULT_LOCALE_MAP_PATH:
+        legacy_resolved = LEGACY_LOCALE_MAP_PATH.resolve()
+        if legacy_resolved.is_file():
+            print(
+                f"Locale map fallback: using legacy file {legacy_resolved} "
+                f"(please migrate to {DEFAULT_LOCALE_MAP_PATH})."
+            )
+            return legacy_resolved
+    return resolved
 
 
 def resolve_locale_target(
@@ -1010,7 +1029,7 @@ def main() -> int:
     parser.add_argument(
         "--locale-map",
         type=Path,
-        default=Path("translate_i18n_todo.locale_map.json"),
+        default=DEFAULT_LOCALE_MAP_PATH,
         help=(
             "Optional locale map JSON for hinting and aliases "
             "(e.g. zh-CN -> Chinese (Simplified, China), jp -> ja-JP)."
@@ -1095,7 +1114,7 @@ def main() -> int:
     project_root = args.project_root.resolve()
     artifacts_dir = args.artifacts_dir.resolve()
     key_prefix = normalize_key_prefix(args.key_prefix)
-    locale_map_path = args.locale_map.resolve() if args.locale_map else None
+    locale_map_path = resolve_locale_map_path(args.locale_map)
     locale_map = load_locale_map(locale_map_path)
     if locale_map_path and locale_map_path.is_file():
         print(f"Loaded locale map entries: {len(locale_map)} ({locale_map_path})")

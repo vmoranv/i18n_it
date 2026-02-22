@@ -22,7 +22,7 @@ GROK_MODEL=grok-4.1-fast
 
 `translate_i18n_todo.py` auto-loads `.env`; CLI args override env values.
 
-Optional: maintain `translate_i18n_todo.locale_map.json` (includes `zh-CN` examples)
+Optional: maintain `locale_map.json` (includes `zh-CN` examples)
 to provide clearer human-readable locale hints for the model.
 
 `locale_map` supports two useful patterns:
@@ -102,7 +102,7 @@ python translate_i18n_todo.py --project-root <project_root> --target-locale zh-C
 Optional custom locale map:
 
 ```bash
-python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN --locale-map translate_i18n_todo.locale_map.json
+python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN --locale-map locale_map.json
 ```
 
 Parallel multi-locale translation (with shorthand like `jp`):
@@ -111,7 +111,7 @@ Parallel multi-locale translation (with shorthand like `jp`):
 python translate_i18n_todo.py \
   --project-root <project_root> \
   --target-locales "en-US,jp,ko-KR" \
-  --locale-map translate_i18n_todo.locale_map.json \
+  --locale-map locale_map.json \
   --concurrency 8 \
   --locale-concurrency 2 \
   --continue-on-error
