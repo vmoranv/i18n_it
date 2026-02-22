@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import io
+import keyword
 import re
 import tokenize
 from dataclasses import dataclass
@@ -26,14 +27,28 @@ ATTR_RE = re.compile(
     r"(?P<name>[A-Za-z_][\w:-]*)=(?P<quote>['\"])(?P<value>[^'\"]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^'\"]*)(?P=quote)"
 )
 TAG_TEXT_RE = re.compile(
-    r">(?P<text>[^<{]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^<{]*)<"
+    r">(?P<text>[^<]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^<]*)<"
 )
 VUE_VAR_RE = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}")
 MUSTACHE_BLOCK_RE = re.compile(r"{{\s*(?P<expr>[^{}]+)\s*}}")
+TERNARY_STRING_EXPR_RE = re.compile(
+    r"^(?P<cond>.+?)\?\s*(?P<q1>['\"])(?P<true>(?:\\.|(?!\2).)*)\2\s*:\s*(?P<q2>['\"])(?P<false>(?:\\.|(?!\4).)*)\4$"
+)
+PY_TERNARY_SINGLE_QUOTE_RE = re.compile(
+    r"^'(?P<true>(?:\\.|[^'])*)'\s+if\s+(?P<cond>.+?)\s+else\s+'(?P<false>(?:\\.|[^'])*)'$"
+)
+PY_TERNARY_DOUBLE_QUOTE_RE = re.compile(
+    r'^"(?P<true>(?:\\.|[^"])*)"\s+if\s+(?P<cond>.+?)\s+else\s+"(?P<false>(?:\\.|[^"])*)"$'
+)
 STRING_LITERAL_RE = re.compile(
     r"(?P<prefix>(?:[rRuUbBfF]{1,2})?)"
     r"(?P<quote>['\"])(?P<text>[^'\"]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^'\"]*)(?P=quote)"
 )
+JS_TEMPLATE_LITERAL_RE = re.compile(
+    r"`(?P<text>(?:[^`\\]|\\.)*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF](?:[^`\\]|\\.)*)`"
+)
+JS_PLACEHOLDER_RE = re.compile(r"\$\{(?P<expr>[^{}]+)\}")
+JS_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FTL_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 PY_STANDALONE_STRING_RE = re.compile(
     r"^\s*(?:[rRuUbBfF]{0,3})?(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*(?:#.*)?$"
@@ -42,6 +57,8 @@ PY_STRING_LITERAL_ANY_RE = re.compile(
     r"(?P<prefix>(?:[rRuUbBfF]{0,3}))"
     r"(?P<quote>['\"])(?P<text>[^'\"\n]*)(?P=quote)"
 )
+FSTRING_START_TOK = getattr(tokenize, "FSTRING_START", None)
+FSTRING_END_TOK = getattr(tokenize, "FSTRING_END", None)
 
 
 @dataclass(frozen=True)
@@ -106,11 +123,13 @@ def normalize_key_cell(text: str) -> str | None:
 def parse_translated_markdown(path: Path) -> list[Edit]:
     edits: list[Edit] = []
     current_path: Path | None = None
+    current_headers: list[str] = []
 
     for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         header_match = HEADER_RE.match(raw_line.strip())
         if header_match:
             current_path = Path(header_match.group("path"))
+            current_headers = []
             continue
 
         if current_path is None or not raw_line.startswith("|"):
@@ -119,7 +138,12 @@ def parse_translated_markdown(path: Path) -> list[Edit]:
             continue
 
         cells = split_md_row(raw_line)
-        if not cells or len(cells) not in {3, 4}:
+        if not cells:
+            continue
+
+        lowered = [unescape_md_cell(cell).strip().strip("`").lower() for cell in cells]
+        if lowered and lowered[0] == "line":
+            current_headers = lowered
             continue
 
         line_match = LINE_CELL_RE.match(cells[0])
@@ -127,14 +151,41 @@ def parse_translated_markdown(path: Path) -> list[Edit]:
             continue
 
         line_no = int(line_match.group("line"))
-        if len(cells) == 4:
-            key = normalize_key_cell(cells[1])
-            source = unescape_md_cell(cells[2])
-            translated = unescape_md_cell(cells[3])
+        headers = (
+            current_headers
+            if current_headers and len(current_headers) == len(cells)
+            else []
+        )
+        if headers:
+            key_idx = headers.index("key") if "key" in headers else None
+            source_idx = headers.index("source") if "source" in headers else None
+            translated_idx: int | None = None
+            for idx, header in enumerate(headers):
+                if header in {"translation", "translated"}:
+                    translated_idx = idx
+                    break
+            if translated_idx is None:
+                for idx, header in enumerate(headers):
+                    if header.startswith("translated_"):
+                        translated_idx = idx
+                        break
         else:
-            key = None
-            source = unescape_md_cell(cells[1])
-            translated = unescape_md_cell(cells[2])
+            key_idx = 1 if len(cells) >= 4 else None
+            source_idx = 2 if len(cells) >= 4 else (1 if len(cells) >= 3 else None)
+            translated_idx = 3 if len(cells) >= 4 else (2 if len(cells) >= 3 else None)
+
+        if source_idx is None or translated_idx is None:
+            continue
+        if source_idx >= len(cells) or translated_idx >= len(cells):
+            continue
+
+        key = (
+            normalize_key_cell(cells[key_idx])
+            if key_idx is not None and key_idx < len(cells)
+            else None
+        )
+        source = unescape_md_cell(cells[source_idx])
+        translated = unescape_md_cell(cells[translated_idx])
         if line_no <= 0 or not translated:
             continue
 
@@ -247,6 +298,41 @@ def extract_mustache_params(expr: str) -> tuple[str | None, str]:
     return m.group(1), cleaned
 
 
+def parse_ternary_string_expr(expr: str) -> tuple[str, str, str] | None:
+    cleaned = expr.strip()
+    match = TERNARY_STRING_EXPR_RE.match(cleaned)
+    if not match:
+        return None
+    cond = match.group("cond").strip()
+    if not cond:
+        return None
+    true_text = match.group("true")
+    false_text = match.group("false")
+    return cond, true_text, false_text
+
+
+def parse_python_ternary_string_expr(expr: str) -> tuple[str, str, str] | None:
+    cleaned = expr.strip()
+    for pattern, quote in (
+        (PY_TERNARY_SINGLE_QUOTE_RE, "'"),
+        (PY_TERNARY_DOUBLE_QUOTE_RE, '"'),
+    ):
+        match = pattern.match(cleaned)
+        if not match:
+            continue
+        cond = match.group("cond").strip()
+        if not cond:
+            return None
+        true_text = (
+            match.group("true").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        false_text = (
+            match.group("false").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        return cond, true_text.strip(), false_text.strip()
+    return None
+
+
 def build_markup_v_html_line(old_noeol: str, key: str, template_func: str) -> str:
     leading = old_noeol[: len(old_noeol) - len(old_noeol.lstrip())]
     vars_found: list[str] = []
@@ -282,6 +368,22 @@ def build_markup_mustache_text_line(
         cursor = blk.end()
     outside.append(stripped[cursor:])
     outside_text = "".join(outside)
+    if (
+        len(blocks) == 1
+        and stripped.startswith("{{")
+        and stripped.endswith("}}")
+        and not HAN_RE.search(outside_text)
+    ):
+        ternary = parse_ternary_string_expr(blocks[0].group("expr"))
+        if ternary:
+            cond, true_text, false_text = ternary
+            if HAN_RE.search(true_text) or HAN_RE.search(false_text):
+                leading = old_noeol[: len(old_noeol) - len(old_noeol.lstrip())]
+                return (
+                    f"{leading}{{{{ {cond} ? {template_func}('{key}.true') : "
+                    f"{template_func}('{key}.false') }}}}"
+                )
+
     if not HAN_RE.search(outside_text):
         return None
 
@@ -306,6 +408,132 @@ def build_markup_mustache_text_line(
     return f"{leading}{{{{ {call} }}}}"
 
 
+def strip_fstring_expr(expr: str) -> str | None:
+    cleaned = expr.strip()
+    if not cleaned:
+        return None
+
+    # Strip top-level conversion/format suffixes, e.g.:
+    #   e!s -> e
+    #   value:.2f -> value
+    #   obj.attr!r -> obj.attr
+    level = 0
+    in_quote: str | None = None
+    escaped = False
+    cut = len(cleaned)
+    for i, ch in enumerate(cleaned):
+        if in_quote:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in {"'", '"'}:
+            in_quote = ch
+            continue
+        if ch in "([{":
+            level += 1
+            continue
+        if ch in ")]}":
+            level = max(level - 1, 0)
+            continue
+        if level == 0 and ch in {"!", ":"}:
+            cut = i
+            break
+
+    expr_core = cleaned[:cut].strip()
+    return expr_core or None
+
+
+def derive_py_placeholder_name(expr_core: str, used_names: set[str]) -> str:
+    identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr_core)
+    blocked = {
+        "True",
+        "False",
+        "None",
+        "len",
+        "str",
+        "repr",
+        "int",
+        "float",
+        "bool",
+        "dict",
+        "list",
+        "set",
+        "tuple",
+        "type",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "sorted",
+        "map",
+        "filter",
+        "zip",
+        "enumerate",
+        "range",
+        "print",
+        "format",
+    }
+
+    base: str | None = None
+    for candidate in reversed(identifiers):
+        if keyword.iskeyword(candidate):
+            continue
+        if candidate in blocked:
+            continue
+        base = candidate
+        break
+    if not base:
+        base = "value"
+
+    name = base
+    idx = 2
+    while name in used_names or keyword.iskeyword(name):
+        name = f"{base}_{idx}"
+        idx += 1
+    return name
+
+
+def extract_fstring_arguments_from_expressions(
+    expressions: list[str],
+) -> list[tuple[str, str]] | None:
+    ordered_args: list[tuple[str, str]] = []
+    seen_exprs: set[str] = set()
+    used_names: set[str] = set()
+
+    for expr in expressions:
+        expr_core = strip_fstring_expr(expr)
+        if not expr_core:
+            return None
+
+        # Pure literals do not need runtime parameters.
+        if re.fullmatch(r"""(?s)(['"]).*?\1""", expr_core):
+            continue
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", expr_core):
+            continue
+
+        if expr_core in seen_exprs:
+            continue
+        seen_exprs.add(expr_core)
+
+        arg_name = derive_py_placeholder_name(expr_core, used_names)
+        used_names.add(arg_name)
+        ordered_args.append((arg_name, expr_core))
+
+    return ordered_args
+
+
+def extract_fstring_arguments(body: str) -> list[tuple[str, str]] | None:
+    expressions = re.findall(r"\{([^{}]+)\}", body)
+    return extract_fstring_arguments_from_expressions(expressions)
+
+
 def build_python_template_line(
     old_noeol: str,
     key: str | None,
@@ -325,48 +553,124 @@ def build_python_template_line(
     if "re.compile(" in old_noeol:
         return None
 
-    # Python 3.12+/3.13 tokenize no longer exposes f-strings as STRING tokens.
-    # Handle a single simple f-string literal with {name} placeholders first.
-    f_matches: list[re.Match[str]] = []
-    for m in PY_STRING_LITERAL_ANY_RE.finditer(old_noeol):
-        prefix = (m.group("prefix") or "").lower()
-        if "f" not in prefix:
-            continue
-        if not allow_non_han and not HAN_RE.search(m.group("text")):
-            continue
-        f_matches.append(m)
-    if len(f_matches) > 1:
-        return None
-    if len(f_matches) == 1:
-        f_match = f_matches[0]
-        prefix = (f_match.group("prefix") or "").lower()
-        if "r" in prefix:
-            return None
-        body = f_match.group("text")
-        placeholder_names = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", body)
-        scrubbed = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "", body)
-        if "{" in scrubbed or "}" in scrubbed or "${" in body:
-            return None
-        ordered_names: list[str] = []
-        seen_names: set[str] = set()
-        for name in placeholder_names:
-            if name in seen_names:
-                continue
-            seen_names.add(name)
-            ordered_names.append(name)
-        if ordered_names:
-            args = ", ".join(f"{name}={name}" for name in ordered_names)
-            replacement = f"{template_func}('{key}', {args})"
-        else:
-            replacement = f"{template_func}('{key}')"
-        return (
-            f"{old_noeol[: f_match.start()]}{replacement}{old_noeol[f_match.end() :]}"
-        )
-
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(old_noeol).readline))
     except tokenize.TokenError:
-        return None
+        # Fallback for partial statement lines (e.g. dict entries ending with "{")
+        # that cannot be tokenized as standalone code snippets.
+        str_matches = list(STRING_LITERAL_RE.finditer(old_noeol))
+        han_str_matches = [m for m in str_matches if HAN_RE.search(m.group("text"))]
+        if not han_str_matches:
+            return None
+        if len(han_str_matches) == 1:
+            str_match = han_str_matches[0]
+            prefix = (str_match.group("prefix") or "").lower()
+            if "f" in prefix:
+                return None
+            replacement = f"{template_func}('{key}')"
+            return (
+                f"{old_noeol[: str_match.start()]}"
+                f"{replacement}"
+                f"{old_noeol[str_match.end() :]}"
+            )
+
+        out = old_noeol
+        indexed_matches = list(enumerate(han_str_matches, start=1))
+        for idx, str_match in reversed(indexed_matches):
+            prefix = (str_match.group("prefix") or "").lower()
+            if "f" in prefix:
+                return None
+            replacement = f"{template_func}('{key}.part{idx}')"
+            out = f"{out[: str_match.start()]}{replacement}{out[str_match.end() :]}"
+        return out
+
+    # Python 3.12+/3.13: f-strings are tokenized as FSTRING_START/MIDDLE/END.
+    if FSTRING_START_TOK is not None and FSTRING_END_TOK is not None:
+        indexed = list(enumerate(tokens))
+        f_starts = [x for x in indexed if x[1].type == FSTRING_START_TOK]
+        f_ends = [x for x in indexed if x[1].type == FSTRING_END_TOK]
+        if len(f_starts) > 1 or len(f_ends) > 1:
+            return None
+        if len(f_starts) == 1 and len(f_ends) == 1:
+            start_idx, f_start = f_starts[0]
+            end_idx, f_end = f_ends[0]
+            if start_idx < end_idx and f_start.start[0] == f_end.end[0]:
+                prefix = (f_start.string or "").lower()
+                if "f" in prefix and "r" not in prefix:
+                    exprs: list[str] = []
+                    brace_depth = 0
+                    expr_start_col: int | None = None
+                    for tok in tokens[start_idx + 1 : end_idx]:
+                        if tok.type == tokenize.OP and tok.string == "{":
+                            if brace_depth == 0:
+                                expr_start_col = tok.end[1]
+                            brace_depth += 1
+                            continue
+                        if tok.type == tokenize.OP and tok.string == "}":
+                            if brace_depth <= 0:
+                                return None
+                            brace_depth -= 1
+                            if brace_depth == 0 and expr_start_col is not None:
+                                exprs.append(old_noeol[expr_start_col : tok.start[1]])
+                                expr_start_col = None
+                            continue
+                    if brace_depth != 0:
+                        return None
+
+                    middle_text = old_noeol[f_start.end[1] : f_end.start[1]]
+                    if (
+                        allow_non_han
+                        or HAN_RE.search(middle_text)
+                        or any(HAN_RE.search(expr) for expr in exprs)
+                    ):
+                        ternary_exprs: list[tuple[str, tuple[str, str, str]]] = []
+                        for expr in exprs:
+                            parsed = parse_python_ternary_string_expr(expr)
+                            if not parsed:
+                                continue
+                            if HAN_RE.search(parsed[1]) or HAN_RE.search(parsed[2]):
+                                ternary_exprs.append((expr, parsed))
+
+                        if len(ternary_exprs) > 1:
+                            return None
+                        if len(ternary_exprs) == 1:
+                            ternary_expr, (cond, _true_text, _false_text) = (
+                                ternary_exprs[0]
+                            )
+                            non_ternary_exprs = [e for e in exprs if e != ternary_expr]
+                            ordered_args = extract_fstring_arguments_from_expressions(
+                                non_ternary_exprs
+                            )
+                            if ordered_args is None:
+                                return None
+                            if ordered_args:
+                                args = ", ".join(
+                                    f"{name}={expr}" for name, expr in ordered_args
+                                )
+                                true_call = f"{template_func}('{key}.true', {args})"
+                                false_call = f"{template_func}('{key}.false', {args})"
+                            else:
+                                true_call = f"{template_func}('{key}.true')"
+                                false_call = f"{template_func}('{key}.false')"
+                            replacement = f"{true_call} if {cond} else {false_call}"
+                        else:
+                            ordered_args = extract_fstring_arguments_from_expressions(
+                                exprs
+                            )
+                            if ordered_args is None:
+                                return None
+                            if ordered_args:
+                                args = ", ".join(
+                                    f"{name}={expr}" for name, expr in ordered_args
+                                )
+                                replacement = f"{template_func}('{key}', {args})"
+                            else:
+                                replacement = f"{template_func}('{key}')"
+                        return (
+                            f"{old_noeol[: f_start.start[1]]}"
+                            f"{replacement}"
+                            f"{old_noeol[f_end.end[1] :]}"
+                        )
 
     matches: list[tokenize.TokenInfo] = []
     for tok in tokens:
@@ -376,8 +680,25 @@ def build_python_template_line(
             continue
         matches.append(tok)
 
-    if len(matches) != 1:
+    if not matches:
         return None
+
+    if len(matches) > 1:
+        out = old_noeol
+        indexed_matches = list(enumerate(matches, start=1))
+        for idx, tok in reversed(indexed_matches):
+            if tok.start[0] != tok.end[0]:
+                return None
+            m = re.match(r"(?i)^([rubf]{1,3})", tok.string)
+            prefix = (m.group(1) if m else "").lower()
+            if "f" in prefix:
+                return None
+            if "${" in tok.string:
+                return None
+            start_col, end_col = tok.start[1], tok.end[1]
+            replacement = f"{template_func}('{key}.part{idx}')"
+            out = f"{out[:start_col]}{replacement}{out[end_col:]}"
+        return out
 
     tok = matches[0]
     if tok.start[0] != tok.end[0]:
@@ -386,28 +707,52 @@ def build_python_template_line(
     # Prefix parsing: r/u/b/f combos before quote.
     m = re.match(r"(?i)^([rubf]{1,3})", tok.string)
     prefix = (m.group(1) if m else "").lower()
-    if "r" in prefix:
+    if "r" in prefix and "f" in prefix:
         return None
     if "f" in prefix:
-        placeholder_names = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", tok.string)
-        scrubbed = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "", tok.string)
+        expressions = re.findall(r"\{([^{}]+)\}", tok.string)
+        ternary_exprs: list[tuple[str, tuple[str, str, str]]] = []
+        for expr in expressions:
+            parsed = parse_python_ternary_string_expr(expr)
+            if not parsed:
+                continue
+            if HAN_RE.search(parsed[1]) or HAN_RE.search(parsed[2]):
+                ternary_exprs.append((expr, parsed))
+        if len(ternary_exprs) > 1:
+            return None
+
+        if len(ternary_exprs) == 1:
+            ternary_expr, (cond, _true_text, _false_text) = ternary_exprs[0]
+            non_ternary_exprs = [e for e in expressions if e != ternary_expr]
+            ordered_args = extract_fstring_arguments_from_expressions(non_ternary_exprs)
+            if ordered_args is None:
+                return None
+            if ordered_args:
+                args = ", ".join(f"{name}={expr}" for name, expr in ordered_args)
+                replacement = (
+                    f"{template_func}('{key}.true', {args}) if {cond} else "
+                    f"{template_func}('{key}.false', {args})"
+                )
+            else:
+                replacement = (
+                    f"{template_func}('{key}.true') if {cond} else "
+                    f"{template_func}('{key}.false')"
+                )
+        else:
+            ordered_args = extract_fstring_arguments(tok.string)
+            if ordered_args is None:
+                return None
+            if ordered_args:
+                args = ", ".join(f"{name}={expr}" for name, expr in ordered_args)
+                replacement = f"{template_func}('{key}', {args})"
+            else:
+                replacement = f"{template_func}('{key}')"
+        scrubbed = re.sub(r"\{[^{}]+\}", "", tok.string)
         if "{" in scrubbed or "}" in scrubbed or "${" in tok.string:
             return None
-        ordered_names: list[str] = []
-        seen_names: set[str] = set()
-        for name in placeholder_names:
-            if name in seen_names:
-                continue
-            seen_names.add(name)
-            ordered_names.append(name)
-        if ordered_names:
-            args = ", ".join(f"{name}={name}" for name in ordered_names)
-            replacement = f"{template_func}('{key}', {args})"
-        else:
-            replacement = f"{template_func}('{key}')"
         start_col, end_col = tok.start[1], tok.end[1]
         return f"{old_noeol[:start_col]}{replacement}{old_noeol[end_col:]}"
-    if "{" in tok.string or "}" in tok.string or "${" in tok.string:
+    if "${" in tok.string:
         return None
 
     tok_idx = next(
@@ -424,6 +769,8 @@ def build_python_template_line(
     start_col, end_col = tok.start[1], tok.end[1]
 
     replacement = f"{template_func}('{key}')"
+    prev_idx = -1
+    next_idx = len(tokens)
     if tok_idx != -1:
         ignore_types = {
             tokenize.INDENT,
@@ -458,7 +805,83 @@ def build_python_template_line(
             # Already inside template_func(...): replace string literal with key literal.
             replacement = f"'{key}'"
 
+    # Python allows implicit concatenation for adjacent string literals.
+    # If one side stops being a string literal after replacement, inject '+'
+    # to keep the expression valid.
+    prev_is_string = (
+        0 <= prev_idx < len(tokens) and tokens[prev_idx].type == tokenize.STRING
+    )
+    next_is_string = (
+        0 <= next_idx < len(tokens) and tokens[next_idx].type == tokenize.STRING
+    )
+    if replacement.startswith(template_func + "("):
+        if prev_is_string and next_is_string:
+            replacement = f" + {replacement} + "
+        elif prev_is_string:
+            replacement = f" + {replacement}"
+        elif next_is_string:
+            replacement = f"{replacement} + "
+
     return f"{old_noeol[:start_col]}{replacement}{old_noeol[end_col:]}"
+
+
+def simplify_js_placeholder_expr(expr: str) -> tuple[str | None, str | None]:
+    cleaned = expr.strip()
+    if not cleaned:
+        return None, None
+
+    for sep in ("||", "??"):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0].strip()
+            break
+    if "?" in cleaned and ":" in cleaned:
+        cleaned = cleaned.split("?", 1)[0].strip()
+
+    cleaned = cleaned.replace("?.", ".")
+    identifiers = JS_IDENTIFIER_RE.findall(cleaned)
+    if not identifiers:
+        return None, None
+    return identifiers[-1], cleaned
+
+
+def extract_js_template_params(body: str) -> list[tuple[str, str]] | None:
+    params: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for match in JS_PLACEHOLDER_RE.finditer(body):
+        name, expr = simplify_js_placeholder_expr(match.group("expr"))
+        if not name or not expr:
+            return None
+        if name in seen:
+            continue
+        seen.add(name)
+        params.append((name, expr))
+    return params
+
+
+def build_js_template_line(
+    old_noeol: str,
+    key: str | None,
+    template_func: str,
+) -> str | None:
+    if not key:
+        return None
+    js_matches = list(JS_TEMPLATE_LITERAL_RE.finditer(old_noeol))
+    if len(js_matches) != 1:
+        return None
+
+    js_match = js_matches[0]
+    body = js_match.group("text")
+    params = extract_js_template_params(body)
+    if params is None:
+        return None
+
+    if params:
+        param_obj = ", ".join(f"{name}: {expr}" for name, expr in params)
+        replacement = f"{template_func}('{key}', {{ {param_obj} }})"
+    else:
+        replacement = f"{template_func}('{key}')"
+
+    return f"{old_noeol[: js_match.start()]}{replacement}{old_noeol[js_match.end() :]}"
 
 
 def build_template_line(
@@ -534,6 +957,30 @@ def build_template_line(
         tag_text_matches = list(TAG_TEXT_RE.finditer(old_noeol))
         if len(tag_text_matches) == 1:
             tag_text_match = tag_text_matches[0]
+            tag_text = tag_text_match.group("text")
+            blocks = list(MUSTACHE_BLOCK_RE.finditer(tag_text))
+            if blocks and HAN_RE.search(tag_text):
+                params: list[tuple[str, str]] = []
+                seen: set[str] = set()
+                for blk in blocks:
+                    name, expr = extract_mustache_params(blk.group("expr"))
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    params.append((name, expr))
+
+                if params:
+                    param_obj = ", ".join(f"{name}: {expr}" for name, expr in params)
+                    call = f"{template_func}('{normalized_key}', {{ {param_obj} }})"
+                else:
+                    call = f"{template_func}('{normalized_key}')"
+                replacement = f">{{{{ {call} }}}}<"
+                return (
+                    f"{old_noeol[: tag_text_match.start()]}"
+                    f"{replacement}"
+                    f"{old_noeol[tag_text_match.end() :]}"
+                )
+
             remaining = (
                 f"{old_noeol[: tag_text_match.start()]}"
                 f"{old_noeol[tag_text_match.end() :]}"
@@ -555,6 +1002,10 @@ def build_template_line(
     # Keep it conservative to avoid breaking syntax:
     # - only one Han-containing literal in this line
     # - no f-string / template interpolation markers
+    js_template_line = build_js_template_line(old_noeol, normalized_key, template_func)
+    if js_template_line is not None:
+        return js_template_line
+
     str_matches = list(STRING_LITERAL_RE.finditer(old_noeol))
     han_str_matches = [m for m in str_matches if HAN_RE.search(m.group("text"))]
     if len(han_str_matches) == 1:
@@ -568,6 +1019,21 @@ def build_template_line(
         replacement = f"{template_func}('{normalized_key}')"
         return f"{old_noeol[: str_match.start()]}{replacement}{old_noeol[str_match.end() :]}"
     if len(han_str_matches) > 1:
+        unique_values = {m.group("text") for m in han_str_matches}
+        if len(unique_values) == 1:
+            for m in han_str_matches:
+                prefix = (m.group("prefix") or "").lower()
+                body = m.group("text")
+                if "f" in prefix:
+                    return None
+                if "{" in body or "}" in body or "${" in body:
+                    return None
+
+            replacement = f"{template_func}('{normalized_key}')"
+            out = old_noeol
+            for m in reversed(han_str_matches):
+                out = f"{out[: m.start()]}{replacement}{out[m.end() :]}"
+            return out
         return None
 
     return None

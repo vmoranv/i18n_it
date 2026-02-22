@@ -1,0 +1,17 @@
+{
+  "default": "English (United States)",
+  "en": "English",
+  "en-US": "English (United States)",
+  "en-GB": "English (United Kingdom)",
+  "zh": "Chinese",
+  "zh-CN": "Chinese (Simplified, Mainland China)",
+  "zh-Hans": "Chinese (Simplified)",
+  "zh-TW": "Chinese (Traditional, Taiwan)",
+  "zh-Hant": "Chinese (Traditional)",
+  "ja-JP": "Japanese (Japan)",
+  "ko-KR": "Korean (South Korea)",
+  "jp": "ja-JP",
+  "kr": "ko-KR",
+  "cn": "zh-CN",
+  "tw": "zh-TW"
+}

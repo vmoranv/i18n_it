@@ -22,6 +22,21 @@ GROK_MODEL=grok-4.1-fast
 
 `translate_i18n_todo.py` auto-loads `.env`; CLI args override env values.
 
+Optional: maintain `translate_i18n_todo.locale_map.json` (includes `zh-CN` examples)
+to provide clearer human-readable locale hints for the model.
+
+`locale_map` supports two useful patterns:
+
+```json
+{
+  "ja-JP": "Japanese (Japan)",
+  "jp": "ja-JP"
+}
+```
+
+- `ja-JP: "Japanese (Japan)"`: human-readable hint for the locale.
+- `jp: "ja-JP"`: shorthand alias to canonical locale (you can pass `jp` later).
+
 ## 1) Extract hardcoded Han text
 
 ```bash
@@ -78,6 +93,32 @@ The translated markdown keeps the `Key` column.
 By default, translated TODO items are auto-marked as checked (`- [x]`) in the source TODO.  
 Disable this via `--no-mark-checked`.
 
+Example translating into Simplified Chinese:
+
+```bash
+python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN
+```
+
+Optional custom locale map:
+
+```bash
+python translate_i18n_todo.py --project-root <project_root> --target-locale zh-CN --locale-map translate_i18n_todo.locale_map.json
+```
+
+Parallel multi-locale translation (with shorthand like `jp`):
+
+```bash
+python translate_i18n_todo.py \
+  --project-root <project_root> \
+  --target-locales "en-US,jp,ko-KR" \
+  --locale-map translate_i18n_todo.locale_map.json \
+  --concurrency 8 \
+  --locale-concurrency 2 \
+  --continue-on-error
+```
+
+In multi-locale mode, the draft contains one column per locale (for example `translated_en-us`, `translated_jp`, `translated_ko-kr`) plus `Locale columns` metadata for automatic sync routing.
+
 Auto-derived default input path:
 
 ```text
@@ -104,12 +145,39 @@ Optional centralized artifacts directory (recommended):
 python translate_i18n_todo.py --project-root <project_root> --artifacts-dir output --target-locale en-US
 ```
 
-## 3) Main workflow: sync into i18n locale JSON (manual mapping, concurrent)
+## 3) Main workflow: sync into locale files (JSON/FTL, manual mapping, concurrent)
 
-Use and maintain these mapping files in this repo (recommended to keep them tracked in Git):
+`sync_i18n_locale.py` is a generic syncer. You must provide a `--mapping` file that routes source paths to locale target files.
 
-- `sync_i18n_locale.astrbot.mapping.json`
-- `sync_i18n_locale.dashboard.mapping.json`
+Minimal mapping example:
+
+```json
+{
+  "mappings": [
+    { "source": "src/components/**", "file": "{locale}/features/common.json", "prefix": "components" },
+    { "source": "src/views/**", "file": "{locale}/features/views.json" },
+    { "source": "**", "file": "{locale}/core/common.json" }
+  ]
+}
+```
+
+Supported placeholders: `{locale}` / `{locale_lower}` (auto-inferred from draft `Target locale`, overridable with `--locale`).
+
+Generic example mappings in this repo (optional):
+
+- `examples/mappings/generic.mapping.json`
+
+If the draft is multi-locale (multiple `translated_*` columns), use `--column all-translated` to apply all locale columns in one pass:
+
+```bash
+python sync_i18n_locale.py \
+  --translated <translated_md> \
+  --i18n-root <locale_root_dir> \
+  --mapping <mapping_json> \
+  --column all-translated \
+  --concurrency 8 \
+  --dry-run
+```
 
 Run sync first in dry-run mode:
 
@@ -118,6 +186,7 @@ python sync_i18n_locale.py \
   --translated <translated_md> \
   --i18n-root <locale_root_dir> \
   --mapping <mapping_json> \
+  --locale zh-CN \
   --concurrency 8 \
   --dry-run
 ```
@@ -148,4 +217,62 @@ If you explicitly want direct text replacement, use:
 
 ```bash
 python apply_i18n_translation_draft.py --translated <translated_md> --project-root <project_root> --column translated
+```
+
+## 5) TODO
+
+See `TODO.md` for remaining generic enhancements.
+
+## 6) Restore FTL Newline Tokens from Baseline (`{"\u000A"}`)
+
+If `{"\u000A"}` tokens were accidentally removed from FTL values by cleanup scripts,
+restore them from a baseline commit:
+
+```bash
+python restore_ftl_newline_tokens.py --repo-root ../target-repo --base-commit 350a11be --dry-run
+python restore_ftl_newline_tokens.py --repo-root ../target-repo --base-commit 350a11be --apply
+```
+
+Default scan target:
+
+```text
+i18n/locales/**/*.ftl
+```
+
+Optional args:
+
+- `--glob`: override file scope (e.g., only `builtin_stars.ftl`)
+- `--token`: override token to restore (default `{"\u000A"}`)
+
+## 7) Optional: Parameterized Import Check/Fix
+
+Generic Python import normalizer (project-agnostic):
+
+```bash
+python ensure_t_imports.py \
+  --root <project_root> \
+  --target-module <canonical_module> \
+  --symbol t \
+  --legacy-module <legacy_module> \
+  --auto-add-on-call \
+  --dry-run
+```
+
+CI check mode (non-zero exit code when fixes are needed):
+
+```bash
+python ensure_t_imports.py \
+  --root <project_root> \
+  --target-module <canonical_module> \
+  --symbol t \
+  --legacy-module <legacy_module> \
+  --auto-add-on-call \
+  --dry-run \
+  --fail-on-change
+```
+
+Frontend `t(...)` import patcher:
+
+```bash
+python ensure_frontend_t_imports.py --frontend-root <frontend_root>
 ```

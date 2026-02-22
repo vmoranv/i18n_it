@@ -1,0 +1,17 @@
+{
+  "mappings": [
+    {
+      "source": "src/components/**",
+      "file": "{locale}/features/common.json",
+      "prefix": "components"
+    },
+    {
+      "source": "src/views/**",
+      "file": "{locale}/features/views.json"
+    },
+    {
+      "source": "**",
+      "file": "{locale}/core/common.json"
+    }
+  ]
+}

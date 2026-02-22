@@ -39,6 +39,7 @@ import concurrent.futures
 import fnmatch
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -46,6 +47,8 @@ from typing import Literal
 HEADER_RE = re.compile(r"^## `(?P<path>[^`]+)`$")
 LINE_CELL_RE = re.compile(r"^`(?P<line>\d+)`$")
 SOURCE_TODO_RE = re.compile(r"^- Source TODO:\s*`(?P<path>[^`]+)`\s*$")
+TARGET_LOCALE_RE = re.compile(r"^- Target locale:\s*`(?P<locale>[^`]+)`\s*$")
+LOCALE_COLUMNS_RE = re.compile(r"^- Locale columns:\s*`(?P<json>\{.*\})`\s*$")
 TODO_LINE_RE = re.compile(
     r"^- \[(?P<mark>[ xX])\] `(?P<location>[^`]+)`(?:\s+\[key:`(?P<key>[^`]+)`\])?\s*(?P<snippet>.*)$"
 )
@@ -55,6 +58,26 @@ TAG_TEXT_RE = re.compile(r">(?P<text>[^<>]+?)<")
 I18N_CALL_KEY_RE = re.compile(
     r"(?:\b(?:\$?t|i18n\.t)\s*\(\s*['\"](?P<k1>[A-Za-z0-9_.-]+)['\"]\s*\)|"
     r"['\"](?P<k2>[A-Za-z0-9_.-]+)['\"]\s*\|\|\s*['\"][^'\"]*[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF][^'\"]*['\"])"
+)
+JS_PLACEHOLDER_RE = re.compile(r"\$\{(?P<expr>[^{}]+)\}")
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CODE_FRAGMENT_RE = re.compile(
+    r"(?:<[^>]+>|/>|\b[a-zA-Z_][\w-]*\s*=|\|\||&&|=>|\breturn\b)"
+)
+CODE_SUFFIX_SPLIT_RE = re.compile(
+    r"\s(?:(?:[A-Za-z_:@-][\w:@-]*\s*=)|(?:persistent-hint\b)|(?:variant\b)|(?:density\b)|(?:type\b)|(?:/?>)|(?:<[^>]+>))"
+)
+TERNARY_SINGLE_QUOTE_RE = re.compile(
+    r"^(?P<cond>.+?)\?\s*'(?P<true>(?:\\.|[^'])*)'\s*:\s*'(?P<false>(?:\\.|[^'])*)'$"
+)
+TERNARY_DOUBLE_QUOTE_RE = re.compile(
+    r'^(?P<cond>.+?)\?\s*"(?P<true>(?:\\.|[^"])*)"\s*:\s*"(?P<false>(?:\\.|[^"])*)"$'
+)
+PY_TERNARY_SINGLE_QUOTE_RE = re.compile(
+    r"^'(?P<true>(?:\\.|[^'])*)'\s+if\s+(?P<cond>.+?)\s+else\s+'(?P<false>(?:\\.|[^'])*)'$"
+)
+PY_TERNARY_DOUBLE_QUOTE_RE = re.compile(
+    r'^"(?P<true>(?:\\.|[^"])*)"\s+if\s+(?P<cond>.+?)\s+else\s+"(?P<false>(?:\\.|[^"])*)"$'
 )
 GLOB_CHARS = set("*?[]")
 
@@ -66,6 +89,7 @@ class DraftItem:
     key: str | None
     source_text: str
     translated_text: str
+    locale: str | None
 
 
 @dataclass(frozen=True)
@@ -144,16 +168,73 @@ def normalize_key_cell(text: str) -> str | None:
     return key or None
 
 
+def normalize_header_cell(text: str) -> str:
+    return unescape_md_cell(text).strip().strip("`").lower()
+
+
+def header_locale(
+    header: str,
+    locale_columns: dict[str, str],
+) -> str | None:
+    if header in {"translation", "translated"}:
+        return None
+    if not header.startswith("translated_"):
+        return None
+    mapped = locale_columns.get(header)
+    if mapped:
+        return mapped.strip().replace("_", "-")
+    suffix = header[len("translated_") :].strip()
+    return suffix.replace("_", "-") or None
+
+
+def translation_column_indexes(
+    headers: list[str],
+    column_mode: str,
+) -> list[int]:
+    translation_like = [
+        idx
+        for idx, header in enumerate(headers)
+        if header in {"translation", "translated"} or header.startswith("translated_")
+    ]
+    if column_mode == "all-translated":
+        return translation_like
+    if column_mode == "translated":
+        for idx in translation_like:
+            if headers[idx] in {"translation", "translated"}:
+                return [idx]
+        if translation_like:
+            return [translation_like[0]]
+    return []
+
+
 def parse_translated_markdown(
-    path: Path, column: Literal["translated", "source"]
+    path: Path, column: Literal["translated", "source", "all-translated"]
 ) -> list[DraftItem]:
     items: list[DraftItem] = []
     current_path: Path | None = None
+    current_headers: list[str] = []
+    locale_columns: dict[str, str] = {}
 
     for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        locale_columns_match = LOCALE_COLUMNS_RE.match(raw_line.strip())
+        if locale_columns_match:
+            payload = locale_columns_match.group("json")
+            try:
+                decoded = json.loads(payload)
+            except json.JSONDecodeError:
+                decoded = {}
+            if isinstance(decoded, dict):
+                locale_columns = {
+                    normalize_header_cell(str(k)): str(v)
+                    for k, v in decoded.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                }
+            continue
+
         header_match = HEADER_RE.match(raw_line.strip())
         if header_match:
             current_path = Path(header_match.group("path"))
+            current_headers = []
             continue
 
         if current_path is None or not raw_line.startswith("|"):
@@ -162,10 +243,15 @@ def parse_translated_markdown(
             continue
 
         cells = split_md_row(raw_line)
-        if not cells or len(cells) not in {3, 4}:
+        if not cells:
             continue
 
-        line_match = LINE_CELL_RE.match(cells[0])
+        row_headers = [normalize_header_cell(cell) for cell in cells]
+        if row_headers and row_headers[0] == "line":
+            current_headers = row_headers
+            continue
+
+        line_match = LINE_CELL_RE.match(cells[0]) if cells else None
         if not line_match:
             continue
 
@@ -173,32 +259,159 @@ def parse_translated_markdown(
         if line_no <= 0:
             continue
 
-        if len(cells) == 4:
-            key = normalize_key_cell(cells[1])
-            source = unescape_md_cell(cells[2])
-            translated = unescape_md_cell(cells[3])
+        headers = (
+            current_headers
+            if current_headers and len(current_headers) == len(cells)
+            else []
+        )
+        header_to_idx = {header: idx for idx, header in enumerate(headers)}
+
+        if headers:
+            key_idx = header_to_idx.get("key")
+            source_idx = header_to_idx.get("source")
+            translation_indexes = translation_column_indexes(headers, column)
         else:
-            key = None
-            source = unescape_md_cell(cells[1])
-            translated = unescape_md_cell(cells[2])
-        value = translated if column == "translated" else source
-        if not value:
+            key_idx = 1 if len(cells) >= 4 else None
+            source_idx = 2 if len(cells) >= 4 else (1 if len(cells) >= 3 else None)
+            translation_indexes = []
+            if column == "translated":
+                if len(cells) >= 4:
+                    translation_indexes = [3]
+                elif len(cells) >= 3:
+                    translation_indexes = [2]
+            elif column == "all-translated":
+                if len(cells) >= 4:
+                    translation_indexes = [3]
+                elif len(cells) >= 3:
+                    translation_indexes = [2]
+
+        if source_idx is None or source_idx >= len(cells):
             continue
 
-        items.append(
-            DraftItem(
-                rel_path=current_path,
-                line_no=line_no,
-                key=key,
-                source_text=source,
-                translated_text=translated,
-            )
+        key = (
+            normalize_key_cell(cells[key_idx])
+            if key_idx is not None and key_idx < len(cells)
+            else None
         )
+        source = unescape_md_cell(cells[source_idx])
+        if not source:
+            continue
+
+        if column == "source":
+            items.append(
+                DraftItem(
+                    rel_path=current_path,
+                    line_no=line_no,
+                    key=key,
+                    source_text=source,
+                    translated_text=source,
+                    locale=None,
+                )
+            )
+            continue
+
+        for idx in translation_indexes:
+            if idx >= len(cells):
+                continue
+            translated = unescape_md_cell(cells[idx])
+            if not translated:
+                continue
+            header = headers[idx] if headers and idx < len(headers) else "translated"
+            items.append(
+                DraftItem(
+                    rel_path=current_path,
+                    line_no=line_no,
+                    key=key,
+                    source_text=source,
+                    translated_text=translated,
+                    locale=header_locale(header, locale_columns),
+                )
+            )
     return items
 
 
 def has_han(text: str) -> bool:
     return bool(HAN_RE.search(text))
+
+
+def unwrap_quoted_text(text: str) -> str:
+    stripped = text.strip()
+    if (
+        len(stripped) >= 2
+        and stripped[0] == stripped[-1]
+        and stripped[0] in {"'", '"', "`"}
+    ):
+        return stripped[1:-1].strip()
+    return stripped
+
+
+def normalize_js_placeholders(text: str) -> str:
+    def simplify_expr(expr: str) -> str | None:
+        cleaned = expr.strip()
+        for sep in ("||", "??"):
+            if sep in cleaned:
+                cleaned = cleaned.split(sep, 1)[0].strip()
+                break
+        if "?" in cleaned and ":" in cleaned:
+            cleaned = cleaned.split("?", 1)[0].strip()
+        if cleaned.startswith("this."):
+            cleaned = cleaned[5:]
+        cleaned = cleaned.replace("?.", ".")
+        candidates = IDENTIFIER_RE.findall(cleaned)
+        if not candidates:
+            return None
+        return candidates[-1]
+
+    def repl(match: re.Match[str]) -> str:
+        name = simplify_expr(match.group("expr"))
+        if not name:
+            return match.group(0)
+        return f"{{{name}}}"
+
+    return JS_PLACEHOLDER_RE.sub(repl, text)
+
+
+def looks_like_code_fragment(text: str) -> bool:
+    candidate = text.strip()
+    if not candidate:
+        return False
+    return bool(CODE_FRAGMENT_RE.search(candidate))
+
+
+def normalize_extracted_value(text: str) -> str:
+    normalized = unwrap_quoted_text(text)
+    normalized = normalize_js_placeholders(normalized)
+    normalized = extract_han_text_from_code_fragment(normalized)
+    return normalized.strip()
+
+
+def extract_han_text_from_code_fragment(text: str) -> str:
+    candidate = text.strip()
+    if not candidate:
+        return candidate
+    if not has_han(candidate):
+        return candidate
+    if not looks_like_code_fragment(candidate):
+        return candidate
+
+    # Prefer quoted natural-language segments when a value is mixed with
+    # markup/attributes (e.g. "\"并发任务数量限制\" persistent-hint ...").
+    unescaped = candidate.replace('\\"', '"').replace("\\'", "'")
+    quoted = [v.strip() for v in extract_quoted_texts(unescaped) if v.strip()]
+    han_quoted = [v for v in quoted if has_han(v)]
+    if han_quoted:
+        return " ".join(han_quoted)
+
+    tag_values = [v.strip() for v in extract_tag_texts(unescaped) if v.strip()]
+    han_tags = [v for v in tag_values if has_han(v)]
+    if han_tags:
+        return " ".join(han_tags)
+
+    prefix = CODE_SUFFIX_SPLIT_RE.split(candidate, maxsplit=1)[0].strip()
+    if has_han(prefix):
+        return prefix
+
+    return candidate
 
 
 def extract_quoted_texts(text: str) -> list[str]:
@@ -236,6 +449,170 @@ def extract_tag_texts(text: str) -> list[str]:
     ]
 
 
+def unwrap_mustache_expr(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{{") and stripped.endswith("}}"):
+        return stripped[2:-2].strip()
+    return stripped
+
+
+def parse_quoted_ternary(text: str) -> tuple[str, str, str] | None:
+    candidate = unwrap_mustache_expr(text)
+    if not candidate:
+        return None
+
+    for pattern, quote in (
+        (TERNARY_SINGLE_QUOTE_RE, "'"),
+        (TERNARY_DOUBLE_QUOTE_RE, '"'),
+    ):
+        match = pattern.match(candidate)
+        if not match:
+            continue
+        cond = match.group("cond").strip()
+        if not cond:
+            return None
+        true_text = (
+            match.group("true").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        false_text = (
+            match.group("false").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        return cond, true_text.strip(), false_text.strip()
+    return None
+
+
+def parse_python_ternary_string_expr(expr: str) -> tuple[str, str, str] | None:
+    cleaned = expr.strip()
+    for pattern, quote in (
+        (PY_TERNARY_SINGLE_QUOTE_RE, "'"),
+        (PY_TERNARY_DOUBLE_QUOTE_RE, '"'),
+    ):
+        match = pattern.match(cleaned)
+        if not match:
+            continue
+        cond = match.group("cond").strip()
+        if not cond:
+            return None
+        true_text = (
+            match.group("true").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        false_text = (
+            match.group("false").replace(f"\\{quote}", quote).replace("\\\\", "\\")
+        )
+        return cond, true_text.strip(), false_text.strip()
+    return None
+
+
+def try_extract_ternary_values(
+    source_text: str, target_text: str
+) -> tuple[str, str] | None:
+    source_ternary = parse_quoted_ternary(source_text)
+    if not source_ternary:
+        return None
+
+    _, source_true, source_false = source_ternary
+    if not (has_han(source_true) or has_han(source_false)):
+        return None
+
+    target_ternary = parse_quoted_ternary(target_text)
+    if target_ternary:
+        _, target_true, target_false = target_ternary
+    else:
+        source_values = extract_quoted_texts(source_text)
+        target_values = extract_quoted_texts(target_text)
+        han_positions = [idx for idx, text in enumerate(source_values) if has_han(text)]
+        selected = [
+            target_values[idx].strip()
+            for idx in han_positions
+            if idx < len(target_values) and target_values[idx].strip()
+        ]
+        if len(selected) < 2:
+            return None
+        target_true, target_false = selected[0], selected[1]
+
+    true_value = normalize_extracted_value(target_true)
+    false_value = normalize_extracted_value(target_false)
+    if not true_value or not false_value:
+        return None
+    return true_value, false_value
+
+
+def try_extract_python_fstring_ternary_values(
+    source_text: str,
+    target_text: str,
+    mode: Literal["smart", "raw"],
+) -> tuple[str, str] | None:
+    source_exprs = re.findall(r"\{([^{}]+)\}", source_text)
+    target_exprs = re.findall(r"\{([^{}]+)\}", target_text)
+    if not source_exprs or len(source_exprs) != len(target_exprs):
+        return None
+
+    ternary_idx = -1
+    source_ternary: tuple[str, str, str] | None = None
+    for idx, expr in enumerate(source_exprs):
+        parsed = parse_python_ternary_string_expr(expr)
+        if not parsed:
+            continue
+        if not (has_han(parsed[1]) or has_han(parsed[2])):
+            continue
+        if ternary_idx != -1:
+            return None
+        ternary_idx = idx
+        source_ternary = parsed
+
+    if ternary_idx == -1 or source_ternary is None:
+        return None
+
+    target_ternary = parse_python_ternary_string_expr(target_exprs[ternary_idx])
+    if not target_ternary:
+        return None
+
+    source_expr = source_exprs[ternary_idx]
+    target_expr = target_exprs[ternary_idx]
+
+    source_true_text = source_text.replace(
+        "{" + source_expr + "}", source_ternary[1], 1
+    )
+    source_false_text = source_text.replace(
+        "{" + source_expr + "}", source_ternary[2], 1
+    )
+    target_true_text = target_text.replace(
+        "{" + target_expr + "}", target_ternary[1], 1
+    )
+    target_false_text = target_text.replace(
+        "{" + target_expr + "}", target_ternary[2], 1
+    )
+
+    true_value = extract_locale_value(source_true_text, target_true_text, mode)
+    false_value = extract_locale_value(source_false_text, target_false_text, mode)
+    if not true_value or not false_value:
+        return None
+    return true_value, false_value
+
+
+def try_extract_multi_literal_values(
+    source_text: str, target_text: str
+) -> list[str] | None:
+    source_values = extract_quoted_texts(source_text)
+    target_values = extract_quoted_texts(target_text)
+    if not source_values or not target_values:
+        return None
+
+    han_positions = [idx for idx, text in enumerate(source_values) if has_han(text)]
+    if len(han_positions) < 2:
+        return None
+
+    selected: list[str] = []
+    for idx in han_positions:
+        if idx >= len(target_values):
+            return None
+        normalized = normalize_extracted_value(target_values[idx].strip())
+        if not normalized:
+            return None
+        selected.append(normalized)
+    return selected
+
+
 def try_extract_assignment_rhs(source_text: str, target_text: str) -> str | None:
     source_match = ASSIGNMENT_RE.match(source_text.strip())
     if not source_match:
@@ -247,13 +624,13 @@ def try_extract_assignment_rhs(source_text: str, target_text: str) -> str | None
     target_match = ASSIGNMENT_RE.match(target_text.strip())
     if target_match and target_match.group("lhs") == source_match.group("lhs"):
         rhs = target_match.group("rhs").strip()
-        if rhs:
+        if rhs and not looks_like_code_fragment(rhs):
             return rhs
 
     lhs, sep, rhs = target_text.partition("=")
     if sep and lhs.strip() == source_match.group("lhs"):
         rhs = rhs.strip()
-        if rhs:
+        if rhs and not looks_like_code_fragment(rhs):
             return rhs
     return None
 
@@ -300,14 +677,14 @@ def extract_locale_value(
         return value
 
     for extractor in (
-        try_extract_assignment_rhs,
         try_extract_from_quotes,
         try_extract_from_tag_text,
+        try_extract_assignment_rhs,
     ):
         extracted = extractor(source_text, target_text)
         if extracted:
-            return extracted
-    return value
+            return normalize_extracted_value(extracted)
+    return normalize_extracted_value(value)
 
 
 def parse_source_todo_path(path: Path) -> Path | None:
@@ -319,6 +696,16 @@ def parse_source_todo_path(path: Path) -> Path | None:
         if not raw_path:
             return None
         return Path(raw_path)
+    return None
+
+
+def parse_target_locale(path: Path) -> str | None:
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        match = TARGET_LOCALE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        locale = match.group("locale").strip()
+        return locale or None
     return None
 
 
@@ -371,7 +758,9 @@ def split_namespaced_key(key: str) -> tuple[str, str] | None:
     return ".".join(parts[:2]), ".".join(parts[2:])
 
 
-def resolve_namespaced_json_target(key: str) -> tuple[Path, str] | None:
+def resolve_namespaced_json_target(
+    key: str, locale: str | None = None
+) -> tuple[Path, str] | None:
     split = split_namespaced_key(key)
     if not split:
         return None
@@ -386,10 +775,15 @@ def resolve_namespaced_json_target(key: str) -> tuple[Path, str] | None:
     }
     if namespace.startswith("features."):
         feature = namespace.split(".", 1)[1]
-        return Path(f"features/{feature}.json"), inner
+        target = Path(f"features/{feature}.json")
+        if locale:
+            target = Path(locale) / target
+        return target, inner
     target = ns_to_file.get(namespace)
     if not target:
         return None
+    if locale:
+        target = Path(locale) / target
     return target, inner
 
 
@@ -439,24 +833,39 @@ def has_glob(pattern: str) -> bool:
     return any(ch in GLOB_CHARS for ch in pattern)
 
 
-def parse_target_spec(raw: object) -> TargetSpec:
+def render_locale_tokens(text: str, locale: str | None) -> str:
+    if "{locale" not in text:
+        return text
+    if not locale:
+        raise ValueError(
+            "Mapping contains {locale} placeholder but locale is empty. "
+            "Pass --locale or include target locale metadata in translated markdown."
+        )
+    normalized = locale.strip().replace("_", "-")
+    lowered = normalized.lower()
+    return text.replace("{locale_lower}", lowered).replace("{locale}", normalized)
+
+
+def parse_target_spec(raw: object, locale: str | None) -> TargetSpec:
     if isinstance(raw, str):
-        return TargetSpec(file=Path(normalize_rel_path(raw)), prefix=None)
+        file_text = render_locale_tokens(raw, locale)
+        return TargetSpec(file=Path(normalize_rel_path(file_text)), prefix=None)
     if isinstance(raw, dict):
         file_raw = raw.get("file")
         if not isinstance(file_raw, str) or not file_raw.strip():
             raise ValueError("Mapping object must contain non-empty 'file'")
+        file_text = render_locale_tokens(file_raw, locale)
         prefix_raw = raw.get("prefix")
         prefix = (
-            prefix_raw.strip()
+            render_locale_tokens(prefix_raw, locale).strip()
             if isinstance(prefix_raw, str) and prefix_raw.strip()
             else None
         )
-        return TargetSpec(file=Path(normalize_rel_path(file_raw)), prefix=prefix)
+        return TargetSpec(file=Path(normalize_rel_path(file_text)), prefix=prefix)
     raise ValueError("Mapping target must be string or object")
 
 
-def load_mapping_rules(mapping_path: Path) -> list[MappingRule]:
+def load_mapping_rules(mapping_path: Path, locale: str | None) -> list[MappingRule]:
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     rules: list[MappingRule] = []
 
@@ -469,7 +878,7 @@ def load_mapping_rules(mapping_path: Path) -> list[MappingRule]:
             if not isinstance(source, str) or not source.strip():
                 raise ValueError("Each mapping item must include non-empty 'source'")
             target = {"file": file_raw, "prefix": row.get("prefix")}
-            spec = parse_target_spec(target)
+            spec = parse_target_spec(target, locale)
             pattern = normalize_rel_path(source)
             rules.append(
                 MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern))
@@ -479,7 +888,7 @@ def load_mapping_rules(mapping_path: Path) -> list[MappingRule]:
             if not isinstance(source, str) or source.startswith("$"):
                 continue
             pattern = normalize_rel_path(source)
-            spec = parse_target_spec(target)
+            spec = parse_target_spec(target, locale)
             rules.append(
                 MappingRule(pattern=pattern, spec=spec, is_glob=has_glob(pattern))
             )
@@ -782,10 +1191,21 @@ def main() -> int:
         help="Mapping JSON file from source paths to locale target files.",
     )
     parser.add_argument(
+        "--locale",
+        default=None,
+        help=(
+            "Locale code for mapping placeholders {locale}/{locale_lower}. "
+            "If omitted, auto-read from translated markdown metadata."
+        ),
+    )
+    parser.add_argument(
         "--column",
-        choices=["translated", "source"],
+        choices=["translated", "source", "all-translated"],
         default="translated",
-        help="Use which column from draft markdown as locale value.",
+        help=(
+            "Use which draft column(s) as locale value. "
+            "'all-translated' applies every translated_* column in one pass."
+        ),
     )
     parser.add_argument(
         "--value-mode",
@@ -847,28 +1267,57 @@ def main() -> int:
 
     draft_items = parse_translated_markdown(translated_path, args.column)
     source_todo_path = parse_source_todo_path(translated_path)
+    inferred_locale = parse_target_locale(translated_path)
+    locale = (args.locale or inferred_locale or "").strip() or None
     if not draft_items:
         print("No draft items found.")
         return 0
 
-    rules = load_mapping_rules(mapping_path)
     json_key_index = build_json_key_file_index(i18n_root)
+
+    if locale:
+        print(f"Locale context: {locale}")
+    locale_contexts = sorted(
+        {
+            item.locale.strip().replace("_", "-")
+            for item in draft_items
+            if item.locale and item.locale.strip()
+        }
+    )
+    if locale_contexts:
+        print(f"Draft locale columns: {', '.join(locale_contexts)}")
 
     grouped_entries: dict[Path, list[LocaleEntry]] = {}
     used_keys_per_file: dict[str, dict[str, str]] = {}
     completed_locations: dict[str, str] = {}
+    completed_location_locales: dict[str, set[str]] = defaultdict(set)
     unmapped: list[str] = []
+    rules_cache: dict[str | None, list[MappingRule]] = {}
+
+    def rules_for(item_locale: str | None) -> list[MappingRule]:
+        cache_key = item_locale if item_locale else None
+        if cache_key not in rules_cache:
+            rules_cache[cache_key] = load_mapping_rules(mapping_path, cache_key)
+        return rules_cache[cache_key]
 
     for item in draft_items:
         src_rel = normalize_rel_path(item.rel_path.as_posix())
-        spec = resolve_target_spec(src_rel, rules)
+        if locale:
+            item_locale = locale
+        else:
+            item_locale = (
+                item.locale.strip().replace("_", "-")
+                if item.locale and item.locale.strip()
+                else None
+            )
+        spec = resolve_target_spec(src_rel, rules_for(item_locale))
         if spec is None:
             unmapped.append(f"{src_rel}:{item.line_no}")
             continue
 
         existing_key = extract_existing_i18n_key(item.source_text)
         if existing_key:
-            namespaced = resolve_namespaced_json_target(existing_key)
+            namespaced = resolve_namespaced_json_target(existing_key, item_locale)
             if namespaced is not None:
                 spec = TargetSpec(file=namespaced[0], prefix=None)
                 existing_key = namespaced[1]
@@ -879,29 +1328,125 @@ def main() -> int:
         prefix = spec.prefix or auto_prefix_for_path(item.rel_path)
         file_key = spec.file.as_posix()
         used = used_keys_per_file.setdefault(file_key, {})
-        row_text = (
-            item.translated_text if args.column == "translated" else item.source_text
-        )
-        value = extract_locale_value(
-            source_text=item.source_text,
-            target_text=row_text,
-            mode=args.value_mode,
-        )
-        key = (
-            existing_key
-            or item.key
-            or make_key(prefix=prefix, line_no=item.line_no, used=used, value=value)
-        )
+        row_text = item.source_text if args.column == "source" else item.translated_text
+        key = existing_key or item.key
 
-        grouped_entries.setdefault(spec.file, []).append(
-            LocaleEntry(
-                key=key,
-                value=value,
-                source_rel_path=src_rel,
-                line_no=item.line_no,
-            )
+        allow_ternary_split = not (
+            (key and key.endswith(".true")) or (key and key.endswith(".false"))
         )
-        completed_locations[f"{src_rel}:{item.line_no}"] = key
+        allow_multi_split = not (
+            (key and key.endswith(".true"))
+            or (key and key.endswith(".false"))
+            or (key and re.search(r"\.part\d+$", key))
+        )
+        ternary_values: tuple[str, str] | None = None
+        if allow_ternary_split:
+            ternary_values = try_extract_ternary_values(item.source_text, row_text)
+            if ternary_values is None:
+                ternary_values = try_extract_python_fstring_ternary_values(
+                    item.source_text,
+                    row_text,
+                    args.value_mode,
+                )
+        if ternary_values:
+            base_key = key or make_key(
+                prefix=prefix,
+                line_no=item.line_no,
+                used=used,
+                value=ternary_values[0],
+            )
+            true_key = f"{base_key}.true"
+            false_key = f"{base_key}.false"
+            used.setdefault(true_key, ternary_values[0])
+            used.setdefault(false_key, ternary_values[1])
+            grouped_entries.setdefault(spec.file, []).extend(
+                [
+                    LocaleEntry(
+                        key=true_key,
+                        value=ternary_values[0],
+                        source_rel_path=src_rel,
+                        line_no=item.line_no,
+                    ),
+                    LocaleEntry(
+                        key=false_key,
+                        value=ternary_values[1],
+                        source_rel_path=src_rel,
+                        line_no=item.line_no,
+                    ),
+                ]
+            )
+            key = base_key
+        else:
+            multi_values = (
+                try_extract_multi_literal_values(item.source_text, row_text)
+                if allow_multi_split
+                else None
+            )
+            if multi_values:
+                base_key = key or make_key(
+                    prefix=prefix,
+                    line_no=item.line_no,
+                    used=used,
+                    value=multi_values[0],
+                )
+                entries = []
+                for idx, value in enumerate(multi_values, start=1):
+                    part_key = f"{base_key}.part{idx}"
+                    used.setdefault(part_key, value)
+                    entries.append(
+                        LocaleEntry(
+                            key=part_key,
+                            value=value,
+                            source_rel_path=src_rel,
+                            line_no=item.line_no,
+                        )
+                    )
+                grouped_entries.setdefault(spec.file, []).extend(entries)
+                key = base_key
+            else:
+                value = extract_locale_value(
+                    source_text=item.source_text,
+                    target_text=row_text,
+                    mode=args.value_mode,
+                )
+                key = key or make_key(
+                    prefix=prefix,
+                    line_no=item.line_no,
+                    used=used,
+                    value=value,
+                )
+                grouped_entries.setdefault(spec.file, []).append(
+                    LocaleEntry(
+                        key=key,
+                        value=value,
+                        source_rel_path=src_rel,
+                        line_no=item.line_no,
+                    )
+                )
+
+        location = f"{src_rel}:{item.line_no}"
+        completed_locations[location] = key
+        completed_location_locales[location].add(item_locale or "__default__")
+
+    if args.column == "all-translated":
+        if locale:
+            required_locale_tags = {locale}
+        else:
+            required_locale_tags = {
+                (
+                    item.locale.strip().replace("_", "-")
+                    if item.locale and item.locale.strip()
+                    else "__default__"
+                )
+                for item in draft_items
+            }
+        completed_locations = {
+            location: key
+            for location, key in completed_locations.items()
+            if required_locale_tags.issubset(
+                completed_location_locales.get(location, set())
+            )
+        }
 
     if unmapped and not args.allow_unmapped:
         preview = "\n".join(f"- {x}" for x in unmapped[:50])
